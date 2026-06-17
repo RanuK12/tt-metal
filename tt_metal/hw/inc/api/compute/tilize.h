@@ -11,8 +11,8 @@
 #ifdef ARCH_BLACKHOLE
 #include "experimental/llk_math_fast_tilize_api.h"
 #endif
-#ifndef ARCH_QUASAR
 #include "llk_math_reduce_api.h"
+#ifndef ARCH_QUASAR
 #include "llk_math_matmul_api.h"
 #endif
 #endif
@@ -111,12 +111,13 @@ ALWI void tilizeA_B_reduce_init(
     UNPACK((llk_unpack_tilizeA_B_init<neginf_srcA, true /*reload_srcB*/, false /*zero_srcA*/, zero_srcA_reduce>(
         icb0, icb1_scaler, block)));
 
-    MATH((llk_math_reduce_init<REDUCE_OP, REDUCE_DIM, DST_ACCUM_MODE, MATH_FIDELITY>()));
+    MATH((llk_math_reduce_init<REDUCE_OP, REDUCE_DIM, DST_ACCUM_MODE, MATH_FIDELITY>(icb0, icb1_scaler)));
     MATH((llk_math_pack_sync_init()));
     MATH((llk_math_hw_configure<DST_ACCUM_MODE>(icb0, icb1_scaler)));
 
     PACK((llk_pack_hw_configure(ocb)));
     PACK((llk_pack_init(ocb)));
+    PACK((llk_pack_dest_init()));
 #endif
 }
 

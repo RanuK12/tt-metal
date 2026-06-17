@@ -270,6 +270,40 @@ std::vector<uint32_t> gold_standard_tilize_w_elwadd(
     return tt::test_utils::pack_vector<uint32_t, bfloat16>(result_vec);
 }
 
+std::vector<uint32_t> gold_standard_tilize_w_reduce_col_max(
+    const std::vector<uint32_t>& src0_vec, const std::vector<uint32_t>& /*src1_vec*/, const GoldenConfig& config) {
+    int H = config.num_tiles_r_dim * 32;
+    int W = config.num_tiles_c_dim * 32;
+    int num_cols_u32 = W / 2;  // bfloat16 pairs per row
+
+    std::vector<bfloat16> src_unpacked = tt::test_utils::unpack_vector<bfloat16, uint32_t>(src0_vec);
+
+    // Compute column-wise max over all rows
+    std::vector<float> col_max(W, -std::numeric_limits<float>::max());
+    for (int h = 0; h < H; h++) {
+        for (int w = 0; w < W; w++) {
+            float val = static_cast<float>(src_unpacked[h * W + w]);
+            col_max[w] = fmaxf(col_max[w], val);
+        }
+    }
+
+    // Build row-major output: 1 tile-row height (32 rows), num_tiles_c tiles wide
+    // Only row 0 is populated with the max values; rows 1-31 are zero (reduce mask)
+    int out_H = 32;
+    std::vector<uint32_t> out_row_major(out_H * num_cols_u32, 0);
+    for (int w = 0; w < W; w += 2) {
+        bfloat16 v0 = bfloat16(col_max[w]);
+        bfloat16 v1 = (w + 1 < W) ? bfloat16(col_max[w + 1]) : bfloat16(0.0f);
+        uint32_t packed = pack_two_bfloat16_into_uint32({v0, v1});
+        out_row_major[w / 2] = packed;  // row 0 only
+    }
+
+    // Tilize the row-major output
+    GoldenConfig out_config = config;
+    out_config.num_tiles_r_dim = 1;
+    return gold_standard_tilize(out_row_major, out_config);
+}
+
 std::vector<uint32_t> gold_standard_pack_rows(const std::vector<uint32_t>& src_vec, const PackRowsConfig& config) {
     // Each row = 16 datums = 8 uint32_t (bfloat16 pairs)
     size_t num_uint32_to_extract = config.num_rows * 8;

@@ -45,6 +45,7 @@
 #include <umd/device/types/arch.hpp>
 #include "impl/data_format/bfloat16_utils.hpp"
 #include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/tensor/mesh_tensor.hpp>
 
 namespace tt::tt_metal {
 class IDevice;
@@ -556,6 +557,206 @@ void run_single_core_unpack_tilizeA_B_program(
     validate_result(test_config, src0_vec, src1_vec, result_vec);
 }
 
+// Metal 2.0 single-core helper for the Quasar `unpack_tilizeA_B` + reduce path.
+// Quasar's unpack_tilizeA_B is only compatible with the reduce math kernel (not eltwise binary).
+// Uses REDUCE_COL + MAX: tilizes row-major src0 data, reduces across rows (H dimension),
+// producing one row of output tiles with only row 0 populated.
+void run_single_core_unpack_tilizeA_B_reduce_program(
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device, const TestConfig& test_config) {
+    auto& cq = mesh_device->mesh_command_queue();
+    const experimental::NodeCoord node{0, 0};
+
+    const uint32_t num_tiles_in = test_config.num_tiles_r * test_config.num_tiles_c;
+    const uint32_t num_tiles_out = test_config.num_tiles_c;  // reduce col: 1 output row of tiles
+    const uint32_t input_dram_buffer_size = test_config.input_single_tile_size * num_tiles_in;
+
+    auto make_flat_tensor_spec = [](uint32_t entry_size, uint32_t total_entries) {
+        const uint32_t entry_size_words = entry_size / sizeof(uint32_t);
+        auto page_config = tt::tt_metal::PageConfig(tt::tt_metal::Layout::ROW_MAJOR);
+        auto memory_config =
+            tt::tt_metal::MemoryConfig{tt::tt_metal::TensorMemoryLayout::INTERLEAVED, tt::tt_metal::BufferType::DRAM};
+        auto tensor_layout = tt::tt_metal::TensorLayout(tt::tt_metal::DataType::UINT32, page_config, memory_config);
+        return tt::tt_metal::TensorSpec(tt::tt_metal::Shape{total_entries, entry_size_words}, tensor_layout);
+    };
+
+    auto in_tensor = MeshTensor::allocate_on_device(
+        *mesh_device, make_flat_tensor_spec(test_config.input_single_tile_size, num_tiles_in), TensorTopology{});
+    auto out_tensor = MeshTensor::allocate_on_device(
+        *mesh_device, make_flat_tensor_spec(test_config.output_single_tile_size, num_tiles_out), TensorTopology{});
+
+    const experimental::DFBSpecName INP_DATA_DFB{"inp_data_dfb"};
+    const experimental::DFBSpecName INP_SCALER_DFB{"inp_scaler_dfb"};
+    const experimental::DFBSpecName OUT_DFB{"out_dfb"};
+    const experimental::KernelSpecName READER{"reader"};
+    const experimental::KernelSpecName WRITER{"writer"};
+    const experimental::KernelSpecName COMPUTE{"compute"};
+    const experimental::TensorParamName IN_TENSOR{"in_tensor"};
+    const experimental::TensorParamName OUT_TENSOR{"out_tensor"};
+
+    experimental::DataflowBufferSpec inp_data_dfb_spec{
+        .unique_id = INP_DATA_DFB,
+        .entry_size = test_config.input_single_tile_size,
+        .num_entries = std::max(2u, test_config.num_tiles_c),
+        .data_format_metadata = test_config.input_fmt,
+    };
+    experimental::DataflowBufferSpec inp_scaler_dfb_spec{
+        .unique_id = INP_SCALER_DFB,
+        .entry_size = 2 * 32 * 32,  // full bfloat16 tile
+        .num_entries = 2,
+        .data_format_metadata = tt::DataFormat::Float16_b,
+    };
+    experimental::DataflowBufferSpec out_dfb_spec{
+        .unique_id = OUT_DFB,
+        .entry_size = test_config.output_single_tile_size,
+        .num_entries = std::max(2u, test_config.num_tiles_c),
+        .data_format_metadata = test_config.output_fmt,
+    };
+
+    experimental::KernelSpec reader_spec{
+        .unique_id = READER,
+        .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/reader_unary_8bank_2_0.cpp",
+        .num_threads = 1,
+        .compiler_options = {.defines = {{"GENERATE_BCAST_SCALER", "1"}, {"BLOCK_SIZE", "1"}}},
+        .dfb_bindings =
+            {{
+                 .dfb_spec_name = INP_DATA_DFB,
+                 .accessor_name = "out_data",
+                 .endpoint_type = experimental::DFBEndpointType::PRODUCER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             },
+             {
+                 .dfb_spec_name = INP_SCALER_DFB,
+                 .accessor_name = "out_scaler",
+                 .endpoint_type = experimental::DFBEndpointType::PRODUCER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             }},
+        .tensor_bindings = {{.tensor_parameter_name = IN_TENSOR, .accessor_name = "src_tensor"}},
+        .runtime_arg_schema = {.runtime_arg_names = {"num_tiles", "scaler"}},
+        .hw_config =
+            experimental::DataMovementHardwareConfig{
+                .gen1_config =
+                    experimental::DataMovementHardwareConfig::Gen1Config{
+                        .processor = tt_metal::DataMovementProcessor::RISCV_1, .noc = tt_metal::NOC::RISCV_1_default},
+                .gen2_config =
+                    experimental::DataMovementHardwareConfig::Gen2Config{
+                        .disable_implicit_sync_for = {INP_DATA_DFB, INP_SCALER_DFB}}},
+    };
+
+    experimental::KernelSpec writer_spec{
+        .unique_id = WRITER,
+        .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/writer_unary_8bank_2_0.cpp",
+        .num_threads = 1,
+        .dfb_bindings = {experimental::ConsumerOf(OUT_DFB, "in")},
+        .tensor_bindings = {{.tensor_parameter_name = OUT_TENSOR, .accessor_name = "dst_tensor"}},
+        .runtime_arg_schema = {.runtime_arg_names = {"num_tiles"}},
+        .hw_config =
+            experimental::DataMovementHardwareConfig{
+                .gen1_config =
+                    experimental::DataMovementHardwareConfig::Gen1Config{
+                        .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default},
+                .gen2_config =
+                    experimental::DataMovementHardwareConfig::Gen2Config{.disable_implicit_sync_for = {OUT_DFB}}},
+    };
+
+    experimental::KernelSpec::CompilerOptions::Defines compute_defines = {
+        {"REDUCE_OP", "PoolType::MAX"},
+        {"REDUCE_DIM", "ReduceDim::REDUCE_COL"},
+    };
+    if (test_config.fp32_dest_acc_en) {
+        compute_defines.emplace("DST_ACCUM_MODE", "1");
+    }
+
+    experimental::KernelSpec compute_spec{
+        .unique_id = COMPUTE,
+        .source = "tests/tt_metal/tt_metal/test_kernels/compute/unpack_tilizeA_B_reduce.cpp",
+        .num_threads = 1,
+        .compiler_options = {.defines = compute_defines},
+        .dfb_bindings =
+            {{
+                 .dfb_spec_name = INP_DATA_DFB,
+                 .accessor_name = "in_data",
+                 .endpoint_type = experimental::DFBEndpointType::CONSUMER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             },
+             {
+                 .dfb_spec_name = INP_SCALER_DFB,
+                 .accessor_name = "in_scaler",
+                 .endpoint_type = experimental::DFBEndpointType::CONSUMER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             },
+             {
+                 .dfb_spec_name = OUT_DFB,
+                 .accessor_name = "out",
+                 .endpoint_type = experimental::DFBEndpointType::PRODUCER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             }},
+        .compile_time_args =
+            {{"per_core_block_cnt", test_config.num_tiles_r}, {"per_core_block_tile_cnt", test_config.num_tiles_c}},
+        .hw_config =
+            experimental::ComputeHardwareConfig{
+                .fp32_dest_acc_en = test_config.fp32_dest_acc_en,
+                .dst_full_sync_en = test_config.dst_full_sync_en,
+            },
+    };
+
+    experimental::WorkUnitSpec wu{
+        .name = "main",
+        .kernels = {READER, WRITER, COMPUTE},
+        .target_nodes = node,
+    };
+
+    experimental::ProgramSpec spec{
+        .name = "unpack_tilizeA_B_reduce",
+        .kernels = {reader_spec, writer_spec, compute_spec},
+        .dataflow_buffers = {inp_data_dfb_spec, inp_scaler_dfb_spec, out_dfb_spec},
+        .tensor_parameters =
+            {
+                {.unique_id = IN_TENSOR, .spec = in_tensor.tensor_spec()},
+                {.unique_id = OUT_TENSOR, .spec = out_tensor.tensor_spec()},
+            },
+        .work_units = {wu},
+    };
+
+    Program program = experimental::MakeProgramFromSpec(*mesh_device, spec);
+
+    distributed::MeshWorkload workload;
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+    auto device_range = distributed::MeshCoordinateRange(zero_coord, zero_coord);
+    workload.add_program(device_range, std::move(program));
+    auto& program_ = workload.get_programs().at(device_range);
+
+    std::vector<uint32_t> src0_vec = create_random_vector_of_bfloat16(input_dram_buffer_size, 100, 42);
+    tt_metal::detail::WriteToBuffer(*in_tensor.mesh_buffer().get_reference_buffer(), src0_vec);
+
+    float scaler_f = 1.0f;
+    experimental::ProgramRunArgs params;
+    params.kernel_run_args = {
+        experimental::ProgramRunArgs::KernelRunArgs{
+            .kernel = READER,
+            .runtime_arg_values =
+                {{node, {{"num_tiles", num_tiles_in}, {"scaler", *reinterpret_cast<uint32_t*>(&scaler_f)}}}},
+        },
+        experimental::ProgramRunArgs::KernelRunArgs{
+            .kernel = WRITER,
+            .runtime_arg_values = {{node, {{"num_tiles", num_tiles_out}}}},
+        },
+        experimental::ProgramRunArgs::KernelRunArgs{.kernel = COMPUTE},
+    };
+    params.tensor_args = {
+        {IN_TENSOR, experimental::ProgramRunArgs::TensorArgument{in_tensor}},
+        {OUT_TENSOR, experimental::ProgramRunArgs::TensorArgument{out_tensor}},
+    };
+    experimental::SetProgramRunArgs(program_, params);
+
+    distributed::EnqueueMeshWorkload(cq, workload, false);
+    distributed::Finish(cq);
+
+    std::vector<uint32_t> result_vec;
+    tt_metal::detail::ReadFromBuffer(*out_tensor.mesh_buffer().get_reference_buffer(), result_vec);
+
+    validate_result(test_config, src0_vec, /*src1_vec=*/{}, result_vec);
+}
+
 }  // namespace unit_tests::compute::tilize
 
 /**************************************
@@ -1035,7 +1236,8 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilize) {
     }
 }
 
-// Quasar Unpack TilizeA_B (tilize + eltwise binary add)
+// Quasar Unpack TilizeA_B (tilize + reduce col max)
+// Quasar's unpack_tilizeA_B is only compatible with the reduce math kernel.
 TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeA_B) {
     for (bool dst_full_sync_en : {true, false}) {
         unit_tests::compute::tilize::TestConfig test_config = {
@@ -1045,8 +1247,8 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeA_B) {
             .num_tiles_r = 2,
             .num_tiles_c = 8,
             .tilize_type = unit_tests::compute::tilize::TilizeType::UNPACK_A_B,
-            .golden_function = ::unit_tests::compute::gold_standard_tilize_w_elwadd};
-        unit_tests::compute::tilize::run_single_core_unpack_tilizeA_B_program(this->devices_.at(0), test_config);
+            .golden_function = ::unit_tests::compute::gold_standard_tilize_w_reduce_col_max};
+        unit_tests::compute::tilize::run_single_core_unpack_tilizeA_B_reduce_program(this->devices_.at(0), test_config);
     }
 }
 

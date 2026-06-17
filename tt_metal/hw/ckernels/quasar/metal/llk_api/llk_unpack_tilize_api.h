@@ -5,7 +5,7 @@
 #pragma once
 #include "llk_unpack_common_api.h"
 #include "llk_unpack_tilize.h"
-#include "llk_unpack_tilize_operands.h"
+#include "llk_unpack_tilize_operands_reduce.h"
 #include "api/dataflow/dataflow_buffer.h"
 
 /*************************************************************************
@@ -85,12 +85,18 @@ template <
     [[maybe_unused]] bool zero_srcA = false,
     [[maybe_unused]] bool zero_srcA_reduce = false>
 inline void llk_unpack_tilizeA_B_init(
-    const std::uint32_t operandA, const std::uint32_t operandB, const std::uint32_t ct_dim) {
+    const std::uint32_t operandA, [[maybe_unused]] const std::uint32_t operandB, const std::uint32_t ct_dim) {
     const std::uint32_t operandA_id = get_operand_id(operandA);
-    const std::uint32_t operandB_id = get_operand_id(operandB);
 
     const ckernel::TensorShape tensor_shape_A = get_operand_tensor_shape(operandA_id);
 
+    buffer_descriptor_u bd_val = {0};
+    bd_val.f.l1_addr_16B = get_local_dfb_interface(operandA_id).tc_slots[0].base_addr;
+    bd_val.f.format = static_cast<std::uint8_t>(unpack_src_format[operandA_id]);
+    bd_val.f.x_dim = ckernel::trisc::FACE_C_DIM;
+    bd_val.f.y_dim = 1;
+    bd_val.f.z_dim = 1;
+    ckernel::trisc::_configure_buf_desc_table_(operandA_id, bd_val);
     // LLK_ASSERT_BLOCK(are_unpackers_AB_configured_correctly<UnpackerProgramType::ProgramByFace>(
     //     unpack_src_format[operandA_id],
     //     unpack_dst_format[operandA_id],
@@ -101,7 +107,7 @@ inline void llk_unpack_tilizeA_B_init(
     //     num_faces,
     //     get_operand_num_faces(operandB_id)));
 
-    _llk_unpack_tilize_operands_init_<TilizeUnpackerSel::UnpA>(operandA_id, operandB_id, ct_dim, tensor_shape_A);
+    _llk_unpack_tilize_operands_reduce_init_(operandA_id, ct_dim, tensor_shape_A);
 }
 
 /**
@@ -134,11 +140,14 @@ inline void llk_unpack_tilizeA_B(
     const std::uint32_t operandA_id = get_operand_id(operandA);
     const std::uint32_t operandB_id = get_operand_id(operandB);
 
+    const ckernel::TensorShape tensor_shape_A = get_operand_tensor_shape(operandA_id);
+
     const LocalDFBInterface& local_dfb_interface_a = get_local_dfb_interface(operandA_id);
     const LocalDFBInterface& local_dfb_interface_b = get_local_dfb_interface(operandB_id);
 
-    const std::uint32_t l1_index_a =
-        local_dfb_interface_a.tc_slots[local_dfb_interface_a.tc_idx].rd_entry_idx + tile_index_a;  // revisit
+    const std::uint32_t l1_index_a = local_dfb_interface_a.tc_slots[local_dfb_interface_a.tc_idx].rd_entry_idx *
+                                         tensor_shape_A.num_faces_r_dim * tensor_shape_A.face_r_dim +
+                                     tile_index_a;
     const std::uint32_t l1_index_b =
         local_dfb_interface_b.tc_slots[local_dfb_interface_b.tc_idx].rd_entry_idx + tile_index_b;
 
@@ -154,7 +163,7 @@ inline void llk_unpack_tilizeA_B(
 
     WAYPOINT("UPTW");
 
-    _llk_unpack_tilize_operands_<TilizeUnpackerSel::UnpA>(l1_index_a, l1_index_b);
+    _llk_unpack_tilize_operands_reduce_(operandB_id, block_ct_dim, tensor_shape_A, l1_index_a, l1_index_b);
 
     WAYPOINT("UPTD");
 }
