@@ -100,8 +100,9 @@ struct TestConfig {
     GoldenFunc golden_function;
 };
 
-// Compute golden + validate; shared between the Metal 2.0 helper (`run_single_core_tilize_program`)
-// and the Gen1 helper (`run_single_core_unpack_tilizeA_B_program`).
+// Compute golden + validate; shared between the Metal 2.0 helper and the Gen1-only
+// UNPACK_A_B helper (whose compute kernel `unpack_tilizeA_B.cpp` has no DFB rewrite
+// in scope for this migration; see `run_single_core_unpack_tilizeA_B_program`).
 static void validate_result(
     const TestConfig& test_config,
     const std::vector<uint32_t>& src0_vec,
