@@ -153,10 +153,6 @@ endif()
 include(GoogleTest)
 gtest_discover_tests(ttml_tests)
 
-# Debug: parallel RNG thread-count determinism tests (excluded from default build).
-# Build with: cmake --build build_Release --target rng_determinism_tests -j
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../debug/rng_tests rng_determinism_tests_build EXCLUDE_FROM_ALL)
-
 add_executable(swiglu_fusion_benchmark benchmark/swiglu_fusion_benchmark.cpp)
 target_link_libraries(
     swiglu_fusion_benchmark
