@@ -528,6 +528,21 @@ _SWEEP_CONFIGS = [
     ("glm5_qc2_kc16_hb4", 8, 2, 16, 4),  # streaming HB<Hi (q-mcast off today)
     ("dsv32_qc2_kc8", 16, 2, 8, 0),  # G=10,U=220 -> aligned today (control)
     ("dsv32_qc1_kc8", 16, 1, 8, 0),  # G=20,U=220 -> no mcast today
+    # landscape sweep (more heads/QC/KC) to spot low-util configs
+    ("glm5_qc2_kc8", 8, 2, 8, 0),  # U=220 divisible
+    ("glm5_qc2_kc32", 8, 2, 32, 0),  # U=55 divisible (5/col)
+    ("glm5_qc5_kc16", 8, 5, 16, 0),  # G=4<gy
+    ("heads4_qc1_kc16", 4, 1, 16, 0),  # fewer heads -> more reader-bound (low util is inherent)
+    ("heads32_qc2_kc8", 32, 2, 8, 0),  # more heads -> more compute-bound
+    ("dsv32_qc4_kc8", 16, 4, 8, 0),  # G=5<gy, 16h
+    # (QC=10 @ 8h and KC=24 @ 16h omitted: oversized -> exceed L1, rejected at CB allocation)
+    # knob search: with mcast now universal, find the global-best (QC,KC) per deployment
+    ("glm5_qc1_kc8", 8, 1, 8, 0),
+    ("glm5_qc1_kc4", 8, 1, 4, 0),
+    ("glm5_qc2_kc4", 8, 2, 4, 0),
+    ("dsv32_qc1_kc4", 16, 1, 4, 0),
+    ("dsv32_qc1_kc16", 16, 1, 16, 0),
+    ("dsv32_qc2_kc4", 16, 2, 4, 0),
 ]
 _SWEEP_IDS = [c[0] for c in _SWEEP_CONFIGS]
 

@@ -36,68 +36,6 @@ inline void patch_arg(tt::tt_metal::RuntimeArgsData& args, uint32_t index, uint3
     args[index] = value;
 }
 
-// Dense deal landed exactly on the grid (q/w mcast along rows, k down columns) and each direction's
-// lines form contiguous NoC rects. 0 = direction off (per-core DRAM read); see call-site block.
-struct McastPlan {
-    bool grid_aligned = false;
-    uint32_t k_mcast_on = 0;  // K columns are vertical NoC rects
-    uint32_t q_mcast_on = 0;  // Q/W rows are single horizontal NoC rects (covers q and w)
-};
-
-// Pure analysis of the physical core coords: grid alignment + per-line NoC-rect contiguity for the
-// two mcast directions. phys is indexed row-major (y * grid.x + x).
-inline McastPlan compute_mcast_plan(
-    CoreCoord grid,
-    const std::vector<CoreCoord>& phys,
-    uint32_t groups,
-    uint32_t num_cores,
-    uint32_t base,
-    uint32_t rem,
-    uint64_t total_units,
-    uint32_t HB,
-    uint32_t Hi) {
-    const auto cidx = [&](uint32_t x, uint32_t y) { return y * grid.x + x; };
-    // grid-aligned iff group g == grid row y and the row's grid_x cores evenly split its k-chunks
-    // (units_per_group == grid.x * base, no remainder, full grid).
-    const uint32_t units_per_group = groups > 0 ? (uint32_t)(total_units / groups) : 0;
-    const bool grid_aligned =
-        groups == grid.y && num_cores == (uint32_t)(grid.x * grid.y) && rem == 0 && units_per_group == grid.x * base;
-
-    // K columns must be vertical NoC rects: shared x down the column, contiguous y spanning the grid.
-    bool k_cols_ok = grid_aligned;
-    for (uint32_t x = 0; x < grid.x && k_cols_ok; ++x) {
-        const uint32_t px = phys[cidx(x, 0)].x;
-        uint32_t ymin = phys[cidx(x, 0)].y, ymax = ymin;
-        for (uint32_t y = 0; y < grid.y; ++y) {
-            const auto& p = phys[cidx(x, y)];
-            if (p.x != px) {
-                k_cols_ok = false;
-            }
-            ymin = std::min<uint32_t>(ymin, p.y);
-            ymax = std::max<uint32_t>(ymax, p.y);
-        }
-        if (ymax - ymin + 1 != grid.y) {
-            k_cols_ok = false;
-        }
-    }
-    // Q/W row-mcast needs every core in a logical row on ONE physical NoC row (mcast = the row's
-    // horizontal bounding-box rect) and all heads resident (one q block). x-contiguity not required
-    // (the NoC routes the bbox rect); only a row spanning multiple physical NoC rows disables it.
-    // grid.x >= grid.y guards the diagonal sender lookup phys[cidx(y, y)] at the call site: cidx(y, y)
-    // is in-bounds only while y < grid.x, which holds for every row iff the grid is at least as wide as
-    // tall (always true on Blackhole's 14x10 grid; the guard keeps a narrower grid safe).
-    bool q_rows_ok = grid_aligned && HB == Hi && grid.x >= grid.y;
-    for (uint32_t y = 0; y < grid.y && q_rows_ok; ++y) {
-        const uint32_t py = phys[cidx(0, y)].y;
-        for (uint32_t x = 0; x < grid.x; ++x) {
-            if (phys[cidx(x, y)].y != py) {
-                q_rows_ok = false;
-            }
-        }
-    }
-    return {grid_aligned, k_cols_ok ? 1u : 0u, q_rows_ok ? 1u : 0u};
-}
-
 // Output-stationary flat deal of causal-valid work units. One unit = QC q-tile-rows x up-to-KC
 // k-tiles, dealt evenly across cores row-major (kernels invert the flat index). Heads stream in
 // HB-head groups; fully-future tiles get the full -inf mask, row tails -inf-filled by the writer
