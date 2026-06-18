@@ -58,6 +58,22 @@ unchanged. Prime G>gy degrades to rows_used==1 (k-mcast off, still correct). Sha
 rows_used_for / cols_used_for in indexer_score_work_split.hpp (factory + perf model agree).
 Added test_indexer_score_genmcast_regimes for the G>gy / uneven-U / prime / streaming paths.
 
+### Knob landscape (mcast now universal -> any QC/KC viable). GLX sp7, bf16 q + bfp8 k, HiFi2.
+util tracks compute intensity (heads): heads4 38.6%, heads8 ~70%, heads16 ~76%, heads32 78.9%.
+GLM5 (8h): QC1/KC16 71.3% @0.338ms (best at deploy latency, faster than control), QC2/KC8 71.1%,
+  control QC2/KC16 70.05% @0.344ms; QC5/KC16 72.2% but @0.84ms/44cores (worse latency).
+DSv32 (16h): control QC2/KC8 76.06% is already optimal; QC1/KC16 75.98% (tie).
+Deployment recommendation: GLM5 -> QC1/KC16 (+1.3pp, equal/better latency); DSv32 -> keep QC2/KC8.
+(glx_config default left at QC2 -- changing the deployed default is the user's call; the op now
+ supports any config with full mcast either way.)
+
+### Band-outer optimization: EVALUATED, NOT DONE
+For G>gy the current group-outer loop re-reads each k-band once per group-phase (QC1 -> 2x). Band-outer
+(read each band once, reuse across phases) would halve QC1 k-reads (~+2pp), but requires holding
+num_groups groups' q/w resident and offsetting the matmul/mul indices into the delicate LLK blocked-mul
+compute hot path -- high regression risk for a marginal, single-config gain. At the structural ceiling
+otherwise. Deferred.
+
 ### Remaining optimization ideas
 - band-outer/group-inner for G>gy: read each band once (reuse across the group phases) instead of
   re-reading per phase -> could lift QC=1 further. Needs >1 group's q resident (cheap). Not done.
