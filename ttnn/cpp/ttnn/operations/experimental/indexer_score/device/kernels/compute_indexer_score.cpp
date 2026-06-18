@@ -279,9 +279,15 @@ inline void stamp_masked_suffix(const WorkUnitSpan& span, uint32_t r, uint32_t s
 }
 
 void kernel_main() {
-    const uint32_t flat_start = get_arg_val<uint32_t>(0);
-    const uint32_t flat_count = get_arg_val<uint32_t>(1);
-    if (flat_count == 0) {
+    // Generalized banded schedule: this core owns a (group-phase x band) rectangle. groups stream in
+    // num_groups phases (absolute group = row_group0 + p*group_stride); within each it walks num_bands
+    // contiguous k-bands (absolute band = band0 + j). One (group, band) cell == one former flat unit.
+    const uint32_t row_group0 = get_arg_val<uint32_t>(0);
+    const uint32_t group_stride = get_arg_val<uint32_t>(1);
+    const uint32_t num_groups = get_arg_val<uint32_t>(2);
+    const uint32_t band0 = get_arg_val<uint32_t>(3);
+    const uint32_t num_bands = get_arg_val<uint32_t>(4);
+    if (num_groups == 0 || num_bands == 0) {
         return;
     }
 
@@ -295,55 +301,56 @@ void kernel_main() {
     CircularBuffer q(cb_q);
 
     WorkUnitSpan span;
-    span.start(flat_start);
 
     constexpr uint32_t unit_strip = q_tiles_per_unit * k_tiles_per_unit;  // QC x KC accumulator slots
     constexpr uint32_t q_row_tiles = q_group_tiles / q_tiles_per_unit;    // heads_per_group * head_dim_tiles
 
-    // One QC x KC unit per iteration. Every unit spans KC k-tiles; the dense schedule may leave a
-    // partial last unit (valid < KC), masked in stamp_masked_suffix.
-    //
-    // No whole-block q/w wait here: resident q is waited PER ROW below (reader pushes a row at a time, so
-    // row 0 runs while row 1 drains); w is waited in the mul phase. Only k is waited up front.
-    for (uint32_t i = 0; i < flat_count; ++i) {
-        k.wait_front(k_chunk_tiles);
-        const uint32_t k_tiles_in_unit = span.k_tiles();
+    // group-OUTER, band-INNER: q/w resident for a group's whole band run (reader pushes one q+w block per
+    // group); each band is one QC x KC unit. The dense schedule may leave a partial last band (valid < KC),
+    // masked in stamp_masked_suffix.
+    for (uint32_t p = 0; p < num_groups; ++p) {
+        const uint32_t group = row_group0 + p * group_stride;
+        for (uint32_t j = 0; j < num_bands; ++j) {
+            span.set(group, band0 + j);
+            k.wait_front(k_chunk_tiles);
+            const uint32_t k_tiles_in_unit = span.k_tiles();
 
-        acc.reserve_back(unit_strip);
-        for (uint32_t r = 0; r < q_tiles_per_unit; ++r) {
-            // wait q rows 0..r only (reader pushes per row): row r reads only its row, so row 0 runs
-            // while row 1 arrives. Cumulative + non-consuming -> immediate once q is resident.
-            if constexpr (!stream_heads) {
-                q.wait_front((r + 1) * q_row_tiles);
-            }
-            const uint32_t slot_base = r * k_tiles_per_unit;
-
-            // PHASE 1 (matmul) + PHASE 2 (mul) per k-col batch. cb_qk holds one batch, so they
-            // alternate; GLM5/DSv32 (heads8/16) = one of each per row.
-            if constexpr (qk_col_batch > 1) {
-                for (uint32_t col_base = 0; col_base < k_tiles_per_unit; col_base += qk_col_batch) {
-                    const uint32_t cols =
-                        (col_base + qk_col_batch <= k_tiles_per_unit) ? qk_col_batch : (k_tiles_per_unit - col_base);
-                    matmul_phase(r, col_base, cols);          // PHASE 1: relu(q.kT) -> cb_qk (head-major)
-                    mul_phase(r, slot_base, col_base, cols);  // PHASE 2: gate-mul + head-reduce -> cb_acc_strip
+            acc.reserve_back(unit_strip);
+            for (uint32_t r = 0; r < q_tiles_per_unit; ++r) {
+                // wait q rows 0..r only (reader pushes per row): row r reads only its row, so row 0 runs
+                // while row 1 arrives. Cumulative + non-consuming -> immediate once q is resident.
+                if constexpr (!stream_heads) {
+                    q.wait_front((r + 1) * q_row_tiles);
                 }
-            } else {
-                accumulate_row_streaming(r, slot_base);  // PHASE 1+2 head-streaming / KC==1 fallback
-            }
+                const uint32_t slot_base = r * k_tiles_per_unit;
 
-            stamp_masked_suffix(span, r, slot_base, k_tiles_in_unit);  // causal -inf on the row's masked suffix
+                // PHASE 1 (matmul) + PHASE 2 (mul) per k-col batch. cb_qk holds one batch, so they
+                // alternate; GLM5/DSv32 (heads8/16) = one of each per row.
+                if constexpr (qk_col_batch > 1) {
+                    for (uint32_t col_base = 0; col_base < k_tiles_per_unit; col_base += qk_col_batch) {
+                        const uint32_t cols = (col_base + qk_col_batch <= k_tiles_per_unit)
+                                                  ? qk_col_batch
+                                                  : (k_tiles_per_unit - col_base);
+                        matmul_phase(r, col_base, cols);          // PHASE 1: relu(q.kT) -> cb_qk (head-major)
+                        mul_phase(r, slot_base, col_base, cols);  // PHASE 2: gate-mul + head-reduce -> cb_acc_strip
+                    }
+                } else {
+                    accumulate_row_streaming(r, slot_base);  // PHASE 1+2 head-streaming / KC==1 fallback
+                }
+
+                stamp_masked_suffix(span, r, slot_base, k_tiles_in_unit);  // causal -inf on the row's masked suffix
+            }
+            acc.push_back(unit_strip);
+
+            // PHASE 3 -- untilize all QC strips in ONE pack_untilize bracket (cost amortizes over QC*KC).
+            compute_kernel_lib::untilize<k_tiles_per_unit, cb_acc_strip, cb_out_strip>(q_tiles_per_unit);
+
+            k.pop_front(k_chunk_tiles);
         }
-        acc.push_back(unit_strip);
-
-        // PHASE 3 -- untilize all QC strips in ONE pack_untilize bracket (cost amortizes over QC*KC).
-        compute_kernel_lib::untilize<k_tiles_per_unit, cb_acc_strip, cb_out_strip>(q_tiles_per_unit);
-
-        k.pop_front(k_chunk_tiles);
-        if (span.advance()) {
-            CircularBuffer(cb_w).pop_front(w_group_tiles);  // single use; gates waited in the mul phase
-            if constexpr (!stream_heads) {
-                q.pop_front(q_group_tiles);
-            }
+        // group's bands done: release this group's resident q/w (one block was pushed per group).
+        CircularBuffer(cb_w).pop_front(w_group_tiles);  // gates waited in the mul phase
+        if constexpr (!stream_heads) {
+            q.pop_front(q_group_tiles);
         }
     }
 }

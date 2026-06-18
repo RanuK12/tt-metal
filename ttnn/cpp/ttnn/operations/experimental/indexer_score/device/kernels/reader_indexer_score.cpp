@@ -232,10 +232,15 @@ void kernel_main() {
     const uint32_t q_addr = get_arg_val<uint32_t>(0);
     const uint32_t k_addr = get_arg_val<uint32_t>(1);
     const uint32_t w_addr = get_arg_val<uint32_t>(2);
-    const uint32_t flat_start = get_arg_val<uint32_t>(3);
-    const uint32_t flat_count = get_arg_val<uint32_t>(4);
-    const McastDir k_dir = read_mcast_dir(5);   // K column mcast: args [5, 13)
-    const McastDir q_dir = read_mcast_dir(13);  // Q/W row mcast: args [13, 21)
+    // Generalized banded schedule: this core owns a (group-phase x band) rectangle. groups -> grid rows
+    // (q/w shared along a row = q_dir mcast), k-bands -> grid columns (k shared down a column = k_dir mcast).
+    const uint32_t row_group0 = get_arg_val<uint32_t>(3);
+    const uint32_t group_stride = get_arg_val<uint32_t>(4);
+    const uint32_t num_groups = get_arg_val<uint32_t>(5);
+    const uint32_t band0 = get_arg_val<uint32_t>(6);
+    const uint32_t num_bands = get_arg_val<uint32_t>(7);
+    const McastDir k_dir = read_mcast_dir(8);   // K column mcast: args [8, 16)
+    const McastDir q_dir = read_mcast_dir(16);  // Q/W row mcast: args [16, 24)
 
     const auto q_acc = TensorAccessor(q_args, q_addr, q_tile_bytes);
     const auto k_acc = TensorAccessor(k_args, k_addr, k_tile_bytes);
@@ -246,37 +251,37 @@ void kernel_main() {
     build_mask_tiles(noc);
 
     WorkUnitSpan span;
-    span.start(flat_start);
 
-    // Resident-heads path order: k -> q -> w. w (gates) is consumed only in the mul phase, so read it
-    // LAST behind the latency-critical q/k. Streaming path reads w FIRST: compute's mul drains streamed
-    // q, so w must be present or compute blocks on w while the reader blocks on the full q CB => deadlock.
-    bool need_group = true;
-    for (uint32_t i = 0; i < flat_count; ++i) {
-        const bool group_start = need_group;
-        if (group_start && stream_heads) {
-            read_w_group(noc, w_acc, span.q_tile_start(), q_dir);  // gates before the streamed q
-        }
-        // k FIRST: compute waits the whole k chunk before any row, so reading k ahead of q lets the
-        // split q-row0 push unblock the first matmul (else the k wait re-serializes it).
-        read_k_chunk(noc, k_acc, span.k_tile_start(), span.k_tiles(), k_dir);
-        if (group_start && !stream_heads) {
-            read_q_rows(noc, q_acc, span.q_tile_start(), q_dir);  // per-row: compute starts on row 0
-        }
+    // group-OUTER, band-INNER. Resident-heads order within a group: k -> q -> w (w/gates consumed only in
+    // the mul phase, so read LAST behind latency-critical q/k). Streaming path reads w FIRST: compute's mul
+    // drains streamed q, so w must be present or both kernels block => deadlock. q/w are read once per
+    // group (j==0); k-mcast fires every band down the column, q/w-mcast once per group along the row.
+    for (uint32_t p = 0; p < num_groups; ++p) {
+        const uint32_t group = row_group0 + p * group_stride;
+        const uint32_t q_row_start = group * q_tiles_per_unit;
         if constexpr (stream_heads) {
-            // one q-block per (r, c) output tile per head group; must match compute's tile order, which
-            // walks the FULL k_tiles_per_unit columns (compute masks the padded tail of a partial last
-            // unit). Using span.k_tiles() here would under-produce q blocks on a partial unit and hang
-            // compute, which still waits/pops a q block for every padded column.
-            for (uint32_t tile_idx = 0; tile_idx < q_tiles_per_unit * k_tiles_per_unit; ++tile_idx) {
-                for (uint32_t first_head = 0; first_head < num_heads; first_head += heads_per_group) {
-                    read_q_block(noc, q_acc, span.q_tile_start(), first_head, q_dir);
+            read_w_group(noc, w_acc, q_row_start, q_dir);  // gates before the streamed q
+        }
+        for (uint32_t j = 0; j < num_bands; ++j) {
+            span.set(group, band0 + j);
+            // k FIRST: compute waits the whole k chunk before any row, so reading k ahead of q lets the
+            // split q-row0 push unblock the first matmul (else the k wait re-serializes it).
+            read_k_chunk(noc, k_acc, span.k_tile_start(), span.k_tiles(), k_dir);
+            if (j == 0 && !stream_heads) {
+                read_q_rows(noc, q_acc, q_row_start, q_dir);   // per-row: compute starts on row 0
+                read_w_group(noc, w_acc, q_row_start, q_dir);  // gates deferred behind q/k
+            }
+            if constexpr (stream_heads) {
+                // one q-block per (r, c) output tile per head group; must match compute's tile order, which
+                // walks the FULL k_tiles_per_unit columns (compute masks the padded tail of a partial last
+                // band). Using span.k_tiles() here would under-produce q blocks on a partial band and hang
+                // compute, which still waits/pops a q block for every padded column.
+                for (uint32_t tile_idx = 0; tile_idx < q_tiles_per_unit * k_tiles_per_unit; ++tile_idx) {
+                    for (uint32_t first_head = 0; first_head < num_heads; first_head += heads_per_group) {
+                        read_q_block(noc, q_acc, q_row_start, first_head, q_dir);
+                    }
                 }
             }
         }
-        if (group_start && !stream_heads) {
-            read_w_group(noc, w_acc, span.q_tile_start(), q_dir);  // gates deferred behind q/k
-        }
-        need_group = span.advance();
     }
 }

@@ -179,13 +179,15 @@ IndexerScoreDeviceOperation::create_op_performance_model(
     const uint64_t num_mul_adds =
         2ull * valid_tiles * Hi * B * static_cast<uint64_t>(tt::constants::TILE_HEIGHT * tt::constants::TILE_WIDTH) * D;
 
-    // Actual cores used: total_units = groups x ceil(Tt/KC), clamped to the grid (matches the factory),
-    // so the perf model's core count equals tracy's CORE COUNT and the utilization ratio lines up.
+    // Actual cores used: the banded product schedule maps G=Sqt/QC groups onto grid rows and
+    // U=ceil(Tt/KC) bands onto grid columns, using a rows_used x cols_used = min(G,gy) x min(U,gx)
+    // rectangle (matches the factory), so the perf model's core count equals tracy's CORE COUNT.
     const uint32_t QC = attrs.program_config.q_chunk_size / tt::constants::TILE_HEIGHT;
     const uint32_t KC = attrs.program_config.k_chunk_size / tt::constants::TILE_WIDTH;
-    const uint64_t total_units = static_cast<uint64_t>(Sqt / QC) * ((Tt + KC - 1) / KC);
+    const uint32_t G = Sqt / QC;
+    const uint32_t U = (Tt + KC - 1) / KC;
     const auto grid = q.device()->compute_with_storage_grid_size();
-    const uint64_t num_cores = std::min<uint64_t>(total_units, static_cast<uint64_t>(grid.x) * grid.y);
+    const uint64_t num_cores = static_cast<uint64_t>(std::min<uint32_t>(G, grid.y)) * std::min<uint32_t>(U, grid.x);
 
     // Blackhole matmul peak: 4096 mul-adds/cycle/core at LoFi, scaled by the fidelity multiplier (the
     // test's peak table is 4096 / multiplier). Fidelity comes from the resolved compute config.

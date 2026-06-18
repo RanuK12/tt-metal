@@ -63,29 +63,22 @@ inline uint32_t row_valid_prefix(uint32_t q_row_abs, uint32_t k_tile_start, uint
 // schedule), so the flat<->(group, unit) map is a plain divide/modulo.
 constexpr uint32_t units_per_group = ws::units_in_group(k_tiles_per_unit, k_len_tiles);
 
-/** (group, unit) cursor over work units, starting at a flat index. */
+/** (group, band) cell cursor. The generalized scheduler maps groups -> grid rows and k-bands ->
+ *  grid columns; each core walks its own (group-phase x band) rectangle and sets the cursor per cell.
+ *  group = absolute q-row-group index; band = absolute k-band index. Accessors are unchanged from the
+ *  former flat walk so every per-unit body (matmul / mask / untilize) is identical. */
 struct WorkUnitSpan {
     uint32_t group = 0;
-    uint32_t unit = 0;
+    uint32_t band = 0;
 
-    void start(uint32_t flat) {
-        group = flat / units_per_group;
-        unit = flat % units_per_group;
+    void set(uint32_t g, uint32_t b) {
+        group = g;
+        band = b;
     }
 
-    /** Advance one unit; true when a new q-row-group begins. */
-    bool advance() {
-        if (++unit == units_per_group) {
-            ++group;
-            unit = 0;
-            return true;
-        }
-        return false;
-    }
-
-    uint32_t q_tile_start() const { return group * q_tiles_per_unit; }  // first q-tile-row of this unit
-    uint32_t k_tile_start() const { return unit * k_tiles_per_unit; }   // first k-tile of this unit
-    uint32_t k_tiles() const {                                          // valid k-tiles in this unit (< full on edge)
+    uint32_t q_tile_start() const { return group * q_tiles_per_unit; }  // first q-tile-row of this cell
+    uint32_t k_tile_start() const { return band * k_tiles_per_unit; }   // first k-tile of this cell
+    uint32_t k_tiles() const {                                          // valid k-tiles (< full on the edge band)
         uint32_t left = k_len_tiles - k_tile_start();
         return left < k_tiles_per_unit ? left : k_tiles_per_unit;
     }
