@@ -840,6 +840,20 @@ class StimuliConfig:
                 StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_B.pt",
             )
 
+        if self.buffer_S is not None:
+            logger.debug(StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_S.pt")
+            torch.save(
+                self.buffer_S,
+                StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_S.pt",
+            )
+
+        if self.buffer_T is not None:
+            logger.debug(StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_T.pt")
+            torch.save(
+                self.buffer_T,
+                StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_T.pt",
+            )
+
         if self.buffer_C is not None:
             logger.debug(StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_C.pt")
             torch.save(
@@ -868,6 +882,18 @@ class StimuliConfig:
             logger.debug(StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_B.pt")
             self.buffer_B = torch.load(
                 StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_B.pt"
+            )
+
+        if self.buffer_S is not None:
+            logger.debug(StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_S.pt")
+            self.buffer_S = torch.load(
+                StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_S.pt"
+            )
+
+        if self.buffer_T is not None:
+            logger.debug(StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_T.pt")
+            self.buffer_T = torch.load(
+                StimuliConfig.STIMULI_CACHE_ROOT / stimuli_id / "buffer_T.pt"
             )
 
         if self.buffer_C is not None:
