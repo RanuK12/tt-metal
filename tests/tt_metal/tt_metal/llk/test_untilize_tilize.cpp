@@ -327,7 +327,19 @@ void run_single_core_tilize_program(
         .source = compute_kernel,
         .num_threads = 1,
         .compiler_options = {.defines = compute_defines},
-        .dfb_bindings = {experimental::ConsumerOf(INPUT_DFB, "in"), experimental::ProducerOf(OUTPUT_DFB, "out")},
+        .dfb_bindings =
+            {{
+                 .dfb_spec_name = INPUT_DFB,
+                 .accessor_name = "in",
+                 .endpoint_type = experimental::DFBEndpointType::CONSUMER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             },
+             {
+                 .dfb_spec_name = OUTPUT_DFB,
+                 .accessor_name = "out",
+                 .endpoint_type = experimental::DFBEndpointType::PRODUCER,
+                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
+             }},
         .compile_time_args = compute_cta_bindings,
         .hw_config =
             experimental::ComputeHardwareConfig{
@@ -557,9 +569,10 @@ void run_single_core_unpack_tilizeA_B_reduce_program(
         .num_entries = std::max(2u, test_config.num_tiles_c),
         .data_format_metadata = test_config.input_fmt,
     };
+    const uint32_t scaler_tile_size = tt::datum_size(tt::DataFormat::Float16_b) * 32 * 32;
     experimental::DataflowBufferSpec inp_scaler_dfb_spec{
         .unique_id = INP_SCALER_DFB,
-        .entry_size = 2 * 32 * 32,  // full bfloat16 tile
+        .entry_size = scaler_tile_size,
         .num_entries = 2,
         .data_format_metadata = tt::DataFormat::Float16_b,
     };
@@ -687,6 +700,8 @@ void run_single_core_unpack_tilizeA_B_reduce_program(
     tt_metal::detail::WriteToBuffer(*in_tensor.mesh_buffer().get_reference_buffer(), src0_vec);
 
     float scaler_f = 1.0f;
+    std::vector<uint32_t> scaler_tile_vec = create_constant_vector_of_bfloat16(scaler_tile_size, scaler_f);
+
     experimental::ProgramRunArgs params;
     params.kernel_run_args = {
         experimental::ProgramRunArgs::KernelRunArgs{
@@ -712,7 +727,7 @@ void run_single_core_unpack_tilizeA_B_reduce_program(
     std::vector<uint32_t> result_vec;
     tt_metal::detail::ReadFromBuffer(*out_tensor.mesh_buffer().get_reference_buffer(), result_vec);
 
-    validate_result(test_config, src0_vec, /*src1_vec=*/{}, result_vec);
+    validate_result(test_config, src0_vec, scaler_tile_vec, result_vec);
 }
 
 }  // namespace unit_tests::compute::tilize
@@ -1201,15 +1216,19 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilize) {
 // Quasar's unpack_tilizeA_B is only compatible with the reduce math kernel.
 TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeA_B) {
     for (bool dst_full_sync_en : {true, false}) {
-        unit_tests::compute::tilize::TestConfig test_config = {
-            .dst_full_sync_en = dst_full_sync_en,
-            .input_single_tile_size = 2 * 1024,
-            .output_single_tile_size = 2 * 1024,
-            .num_tiles_r = 2,
-            .num_tiles_c = 8,
-            .tilize_type = unit_tests::compute::tilize::TilizeType::UNPACK_A_B,
-            .golden_function = ::unit_tests::compute::gold_standard_tilize_w_reduce_col_max};
-        unit_tests::compute::tilize::run_single_core_unpack_tilizeA_B_reduce_program(this->devices_.at(0), test_config);
+        for (bool fp32_dest_acc_en : {true, false}) {
+            unit_tests::compute::tilize::TestConfig test_config = {
+                .dst_full_sync_en = dst_full_sync_en,
+                .fp32_dest_acc_en = fp32_dest_acc_en,
+                .input_single_tile_size = 2 * 1024,
+                .output_single_tile_size = 2 * 1024,
+                .num_tiles_r = 2,
+                .num_tiles_c = 8,
+                .tilize_type = unit_tests::compute::tilize::TilizeType::UNPACK_A_B,
+                .golden_function = ::unit_tests::compute::gold_standard_tilize_w_reduce_col_max};
+            unit_tests::compute::tilize::run_single_core_unpack_tilizeA_B_reduce_program(
+                this->devices_.at(0), test_config);
+        }
     }
 }
 
