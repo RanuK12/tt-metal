@@ -108,14 +108,6 @@ static void validate_result(
     const std::vector<uint32_t>& src0_vec,
     const std::vector<uint32_t>& src1_vec,
     const std::vector<uint32_t>& result_vec) {
-    // For 8-bit integers (Int8/UInt8) hardware keeps integers as-is in dest/CB even with fp32_dest_acc_en.
-    // For 8-bit floats (Fp8_e4m3, Lf8) the L1 CB stays at 8-bit — the packer gasket converts
-    // Float32 DEST → 8-bit at output. Converting the golden to Float32 in either case would mismatch
-    // actual hardware behavior.
-    bool is_8bit_format =
-        test_config.output_fmt == tt::DataFormat::Int8 || test_config.output_fmt == tt::DataFormat::UInt8 ||
-        test_config.output_fmt == tt::DataFormat::Fp8_e4m3 || test_config.output_fmt == tt::DataFormat::Lf8;
-
     vector<uint32_t> golden;
     ::unit_tests::compute::GoldenConfig config = {
         .num_tiles_r_dim = test_config.num_tiles_r,
@@ -147,7 +139,7 @@ static void validate_result(
         },
         test_config.golden_function);
 
-    if (test_config.fp32_dest_acc_en && !is_8bit_format) {
+    if (test_config.output_fmt == tt::DataFormat::Float32) {
         vector<bfloat16> golden_unpacked = unpack_vector<bfloat16, uint32_t>(golden);
         // Increasing the size since from BFP16 two times, since storing is in FP32
         golden.resize(golden.size() * 2);
@@ -749,6 +741,7 @@ TEST_F(LLKMeshDeviceFixture, TensixComputeUnpackTilize) {
                     .num_tiles_r = num_tile[0],
                     .num_tiles_c = num_tile[1],
                     .tilize_type = unit_tests::compute::tilize::TilizeType::UNPACK_A,
+                    .output_fmt = fp32_dest_acc_en ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b,
                     .golden_function = ::unit_tests::compute::gold_standard_tilize};
                 unit_tests::compute::tilize::run_single_core_tilize_program(this->devices_.at(0), test_config);
             }
@@ -842,6 +835,7 @@ TEST_F(LLKMeshDeviceFixture, TensixComputeFastTilize) {
                     .num_tiles_r = num_tile[0],
                     .num_tiles_c = num_tile[1],
                     .tilize_type = unit_tests::compute::tilize::TilizeType::UNPACK_A,
+                    .output_fmt = fp32_dest_acc_en ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b,
                     .golden_function = ::unit_tests::compute::gold_standard_tilize};
                 unit_tests::compute::tilize::run_single_core_tilize_program(this->devices_.at(0), test_config);
             }
@@ -1144,10 +1138,10 @@ TEST_F(LLKQuasarMeshDeviceSingleCardFixture, QuasarComputePackUntilize) {
         for (bool dst_full_sync_en : {true, false}) {
             for (bool fp32_dest_acc_en : {true, false}) {
                 for (tt::DataFormat data_format : {tt::DataFormat::Float16_b, tt::DataFormat::Int16}) {
-                    if ((fp32_dest_acc_en || dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40 ||
-                         data_format == tt::DataFormat::Float16_b)) {
-                        continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
-                    }
+                    // if ((fp32_dest_acc_en || dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40 ||
+                    //      data_format == tt::DataFormat::Float16_b)) {
+                    //     continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
+                    // }
                     run_quasar_tilize_untilize_test(
                         this->devices_.at(0),
                         cfg[0],
@@ -1169,10 +1163,10 @@ TEST_F(LLKQuasarMeshDeviceSingleCardFixture, QuasarComputePackUntilizeDst) {
         for (bool dst_full_sync_en : {true, false}) {
             for (bool fp32_dest_acc_en : {true, false}) {
                 for (tt::DataFormat data_format : {tt::DataFormat::Float16_b, tt::DataFormat::Int16}) {
-                    if ((fp32_dest_acc_en || dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40 ||
-                         data_format == tt::DataFormat::Float16_b)) {
-                        continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
-                    }
+                    // if ((fp32_dest_acc_en || dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40 ||
+                    //      data_format == tt::DataFormat::Float16_b)) {
+                    //     continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
+                    // }
                     run_quasar_tilize_untilize_test(
                         this->devices_.at(0),
                         cfg[0],
@@ -1194,10 +1188,10 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilize) {
         for (bool dst_full_sync_en : {true, false}) {
             for (bool fp32_dest_acc_en : {true, false}) {
                 for (tt::DataFormat data_format : {tt::DataFormat::Float16_b, tt::DataFormat::Int16}) {
-                    if ((fp32_dest_acc_en || dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40 ||
-                         data_format != tt::DataFormat::Int16)) {
-                        continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
-                    }
+                    // if ((fp32_dest_acc_en || dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40 ||
+                    //      data_format != tt::DataFormat::Int16)) {
+                    //     continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
+                    // }
                     run_quasar_tilize_untilize_test(
                         this->devices_.at(0),
                         cfg[0],
@@ -1237,9 +1231,9 @@ TEST_F(LLKQuasarMeshDeviceSingleCardFixture, QuasarComputePackUntilizeInt32) {
     std::vector<vector<uint32_t>> test_configs = {{1, 1}, {4, 12}, {8, 8}, {40, 14}, {2, 40}};
     for (auto& cfg : test_configs) {
         for (bool dst_full_sync_en : {true, false}) {
-            if ((dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40)) {
-                continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
-            }
+            // if ((dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40)) {
+            //     continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
+            // }
             run_quasar_tilize_untilize_test(
                 this->devices_.at(0),
                 cfg[0],
@@ -1257,9 +1251,9 @@ TEST_F(LLKQuasarMeshDeviceSingleCardFixture, QuasarComputePackUntilizeDstInt32) 
     std::vector<vector<uint32_t>> test_configs = {{1, 1}, {4, 12}, {8, 8}, {40, 14}, {2, 40}};
     for (auto& cfg : test_configs) {
         for (bool dst_full_sync_en : {true, false}) {
-            if ((dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40)) {
-                continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
-            }
+            // if ((dst_full_sync_en || cfg[0] != 2 || cfg[1] != 40)) {
+            //     continue;  // TODO (#38092): Remove when we can run back to back tests on Quasar
+            // }
             run_quasar_tilize_untilize_test(
                 this->devices_.at(0),
                 cfg[0],
@@ -1289,6 +1283,7 @@ TEST_F(LLKMeshDeviceFixture, TensixComputePackUntilize) {
                     .num_tiles_r = num_tile[0],
                     .num_tiles_c = num_tile[1],
                     .untilize_type = unit_tests::compute::tilize::UntilizeType::PACK,
+                    .output_fmt = fp32_dest_acc_en ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b,
                     .golden_function = ::unit_tests::compute::gold_standard_untilize};
                 unit_tests::compute::tilize::run_single_core_tilize_program(this->devices_.at(0), test_config);
             }
