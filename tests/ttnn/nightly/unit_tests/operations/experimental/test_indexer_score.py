@@ -586,3 +586,43 @@ def test_indexer_score_sweep_math_util(label, heads, qc, kc, hb):
         f"SWEEP {label}: heads={heads} QC={qc} KC={kc} HB={hb} -> device={duration_ns / 1e6:.4f} ms, "
         f"cores={core_count}, core*ns={core_ns / 1e6:.2f}, math_util={math_util:.2f}%"
     )
+
+
+# ---------------------------------------------------------------------------
+# Generalized-multicast regime coverage (accuracy): exercises the banded-product scheduler paths the
+# small knobs/shapes tests miss -- chiefly G > grid.y (groups phase-stacked onto rows, the case that
+# would deadlock the k-mcast column if rows took uneven group counts), G prime > grid.y (rows_used==1,
+# k-mcast off but still correct), uneven k-band split across columns (U not a multiple of grid.x),
+# partial last band, and phase-stacking under head streaming. Same exact -inf + PCC + negative-gate
+# check as the deployments. q_chunk/k_chunk are in ELEMENTS (tiles*32); head_group 0 = all resident.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "heads, dim, sq, t, chunk_start, q_chunk, k_chunk, head_group",
+    [
+        # G>gy, uniform groups/row (G=12 -> rows_used=6, 2 groups/row), U==grid.x (k-mcast on)
+        (8, 128, 384, 704, 128, 32, 64, 0),
+        # G>gy with U NOT a multiple of grid.x=11 (G=20 -> rows_used=10, 2 groups/row; U=50, uneven cols)
+        (8, 128, 640, 1600, 256, 32, 32, 0),
+        # G prime > gy (Sqt=11, QC=1 -> G=11 -> rows_used=1, k-mcast off): correctness without mcast
+        (8, 128, 352, 512, 128, 32, 32, 0),
+        # G>gy + KC does not divide Tt (partial last band) + U<grid.x (G=12, U=7)
+        (8, 128, 384, 608, 64, 32, 96, 0),
+        # G>gy + head streaming (HB=8<16): q-mcast off, k-mcast on, phase-stacked groups
+        (16, 128, 384, 704, 128, 32, 64, 8),
+        # G>gy big (G=40 -> rows_used=10, 4 groups/row) + uneven U
+        (8, 128, 1280, 1600, 256, 32, 32, 0),
+    ],
+    ids=[
+        "Ggy_uniform",
+        "Ggy_uneven_U",
+        "Ggy_prime",
+        "Ggy_partial_kc",
+        "Ggy_stream",
+        "Ggy_big",
+    ],
+)
+def test_indexer_score_genmcast_regimes(device, heads, dim, sq, t, chunk_start, q_chunk, k_chunk, head_group):
+    """Banded-product scheduler regimes beyond the original knobs/shapes coverage: G>grid.y phase
+    stacking, prime G, uneven k-band columns, partial bands, and streaming -- all checked for exact
+    causality + PCC like the deployments."""
+    _run_and_check(device, heads, dim, sq, t, chunk_start, q_chunk, k_chunk, head_group)

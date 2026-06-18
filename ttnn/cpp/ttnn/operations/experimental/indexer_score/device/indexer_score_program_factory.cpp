@@ -155,8 +155,8 @@ IndexerScoreProgramFactory::cached_program_t IndexerScoreProgramFactory::create(
     const auto grid = q.device()->compute_with_storage_grid_size();
     const uint32_t gx = grid.x, gy = grid.y;
 
-    const uint32_t rows_used = std::min<uint32_t>(G, gy);  // grid rows carrying groups
-    const uint32_t cols_used = std::min<uint32_t>(U, gx);  // grid cols carrying band-chunks
+    const uint32_t rows_used = rows_used_for(G, gy);  // grid rows carrying groups (divides G when G>gy)
+    const uint32_t cols_used = cols_used_for(U, gx);  // grid cols carrying band-chunks
     const uint32_t num_cores = rows_used * cols_used;
 
     // Contiguous even band split across the used columns: first (U % cols_used) cols get one extra band.
@@ -170,10 +170,10 @@ IndexerScoreProgramFactory::cached_program_t IndexerScoreProgramFactory::create(
             off += col_band_size[x];
         }
     }
-    // Groups per row: rows_used == min(G,gy). When G>gy each row runs ceil/floor(G/gy) groups
-    // (group = y + p*rows_used), so the count per row differs by at most 1 and every column stays
-    // band-lockstep within a phase.
-    const uint32_t groups_per_row_base = G / rows_used, groups_per_row_extra = G % rows_used;
+    // Groups per row: rows_used divides G, so every row runs the SAME num_groups = G/rows_used groups
+    // (group = y + p*rows_used, p in [0,num_groups)). Uniform across all rows => every column takes the
+    // same number of group-phases => k-mcast down the column stays lockstep (no sender/receiver hang).
+    const uint32_t num_groups = G / rows_used;
 
     const CoreRange core_rect(CoreCoord{0, 0}, CoreCoord{cols_used - 1, rows_used - 1});
     const CoreRangeSet core_ranges(core_rect);
@@ -321,7 +321,6 @@ IndexerScoreProgramFactory::cached_program_t IndexerScoreProgramFactory::create(
     std::vector<CoreCoord> cores;
     cores.reserve(num_cores);
     for (uint32_t y = 0; y < rows_used; ++y) {
-        const uint32_t num_groups = groups_per_row_base + (y < groups_per_row_extra ? 1u : 0u);
         // physical bbox of row y across the used columns (q/w mcast rect); py constant along the row.
         uint32_t q_xs = u32(phys2[y][0].x), q_xe = u32(phys2[y][0].x);
         for (uint32_t x = 0; x < cols_used; ++x) {

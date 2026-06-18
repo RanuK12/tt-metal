@@ -33,4 +33,30 @@ constexpr uint32_t units_in_group(uint32_t k_tiles_per_unit, uint32_t k_len_tile
     return (k_len_tiles + k_tiles_per_unit - 1) / k_tiles_per_unit;
 }
 
+// ---- generalized banded-product grid mapping (shared by the factory and the perf model) ----------
+// G groups map to grid rows, U k-bands to grid columns. Both sides must agree on the rectangle so the
+// perf model's core count equals the factory's (and tracy's CORE COUNT).
+
+/** Grid rows used for the G groups. G<=gy: one group per row. G>gy: the LARGEST divisor of G that is
+ *  <= gy, so every row carries exactly G/rows_used groups (uniform). Uniformity is required: k-mcast
+ *  runs down a column, so all rows in a column must take the same number of group-phases or the
+ *  column's sender would wait on receivers that already finished (deadlock). A prime G>gy degrades to
+ *  rows_used==1 (k-mcast off for that shape), which is correct, just unaccelerated. */
+constexpr uint32_t rows_used_for(uint32_t G, uint32_t gy) {
+    if (G <= gy) {
+        return G;
+    }
+    uint32_t best = 1;
+    for (uint32_t d = 2; d <= gy; ++d) {
+        if (G % d == 0) {
+            best = d;
+        }
+    }
+    return best;
+}
+
+/** Grid columns used for the U k-bands: min(U, gx). Columns may carry uneven band counts (each column
+ *  is an independent k-mcast rect; q-mcast is a per-group rendezvous that tolerates the skew). */
+constexpr uint32_t cols_used_for(uint32_t U, uint32_t gx) { return U < gx ? U : gx; }
+
 }  // namespace ttnn::operations::experimental::indexer_score

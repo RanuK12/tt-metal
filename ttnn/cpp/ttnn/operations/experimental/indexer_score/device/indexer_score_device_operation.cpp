@@ -10,6 +10,8 @@
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/hal.hpp>
 
+#include "kernels/indexer_score_work_split.hpp"  // shared rows_used_for / cols_used_for grid mapping
+
 namespace ttnn::operations::experimental::indexer_score {
 
 IndexerScoreDeviceOperation::program_factory_t IndexerScoreDeviceOperation::select_program_factory(
@@ -180,14 +182,15 @@ IndexerScoreDeviceOperation::create_op_performance_model(
         2ull * valid_tiles * Hi * B * static_cast<uint64_t>(tt::constants::TILE_HEIGHT * tt::constants::TILE_WIDTH) * D;
 
     // Actual cores used: the banded product schedule maps G=Sqt/QC groups onto grid rows and
-    // U=ceil(Tt/KC) bands onto grid columns, using a rows_used x cols_used = min(G,gy) x min(U,gx)
-    // rectangle (matches the factory), so the perf model's core count equals tracy's CORE COUNT.
+    // U=ceil(Tt/KC) bands onto grid columns, using a rows_used x cols_used rectangle (rows_used divides
+    // G when G>gy). Shares rows_used_for/cols_used_for with the factory, so the perf model's core count
+    // equals the factory's (and tracy's CORE COUNT).
     const uint32_t QC = attrs.program_config.q_chunk_size / tt::constants::TILE_HEIGHT;
     const uint32_t KC = attrs.program_config.k_chunk_size / tt::constants::TILE_WIDTH;
     const uint32_t G = Sqt / QC;
     const uint32_t U = (Tt + KC - 1) / KC;
     const auto grid = q.device()->compute_with_storage_grid_size();
-    const uint64_t num_cores = static_cast<uint64_t>(std::min<uint32_t>(G, grid.y)) * std::min<uint32_t>(U, grid.x);
+    const uint64_t num_cores = static_cast<uint64_t>(rows_used_for(G, grid.y)) * cols_used_for(U, grid.x);
 
     // Blackhole matmul peak: 4096 mul-adds/cycle/core at LoFi, scaled by the fidelity multiplier (the
     // test's peak table is 4096 / multiplier). Fidelity comes from the resolved compute config.
