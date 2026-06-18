@@ -508,3 +508,81 @@ def test_indexer_score_perf_check(case_id, heads, expected_util):
         f"Math utilization {utilization:.2f}% outside band [{lower:.2f}, {upper:.2f}] "
         f"(expected {expected_util:.2f}%, margin +/- {INDEXER_PERF_MARGIN * 100:.1f}%)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Config sweep for the generalized-multicast work: measures (device_ns, cores, math_util) for the
+# SAME GLX sp7 shape (bf16 q + bfp8 k, HiFi2) across QC/KC/HB regimes. Used to compare the current
+# branch (most of these get NO mcast) vs the generalized scheduler. Run locally with the tracy build:
+#   pytest .../test_indexer_score.py::test_indexer_score_sweep_math_util
+# Report the triplet (duration, cores, util): util = mm_flops/(cores*cycles*peak), and util is only
+# directly comparable across branches when cores is unchanged (else lead with device_ns / cores*ns).
+# ---------------------------------------------------------------------------
+# (label, heads, QC_tiles, KC_tiles, HB)  -- GLX shape, sp_rank 7, bf16 q + bfp8 k (HiFi2)
+_SWEEP_CONFIGS = [
+    ("glm5_qc2_kc16", 8, 2, 16, 0),  # G=10,U=110 -> aligned today (control)
+    ("glm5_qc1_kc16", 8, 1, 16, 0),  # G=20,U=110 -> no mcast today (G>gy)
+    ("glm5_qc4_kc16", 8, 4, 16, 0),  # G=5,U=110  -> no mcast today (G<gy)
+    ("glm5_qc1_kc32", 8, 1, 32, 0),  # G=20,U=55  -> compute-opt, no mcast today
+    ("glm5_qc2_kc24", 8, 2, 24, 0),  # G=10,U=74  -> no mcast today (gx ndiv U)
+    ("glm5_qc2_kc16_hb4", 8, 2, 16, 4),  # streaming HB<Hi (q-mcast off today)
+    ("dsv32_qc2_kc8", 16, 2, 8, 0),  # G=10,U=220 -> aligned today (control)
+    ("dsv32_qc1_kc8", 16, 1, 8, 0),  # G=20,U=220 -> no mcast today
+]
+_SWEEP_IDS = [c[0] for c in _SWEEP_CONFIGS]
+
+
+def _sweep_cfg(qc_tiles, kc_tiles, hb):
+    return ttnn.IndexerScoreProgramConfig(q_chunk_size=qc_tiles * 32, k_chunk_size=kc_tiles * 32, head_group_size=hb)
+
+
+@pytest.mark.skipif(os.environ.get("CI") == "true", reason="perf test - run locally with tracy")
+@pytest.mark.parametrize("label, heads, qc, kc, hb", _SWEEP_CONFIGS, ids=_SWEEP_IDS)
+def test_indexer_score_sweep_perf_impl(device, label, heads, qc, kc, hb):
+    """Inner profiled test: a few indexer_score ops at GLX sp7 for one (heads,QC,KC,HB). No accuracy check."""
+    q, k, w = make_inputs(heads, GLX_DIM, GLX_SQ, GLX_T)
+    q_dev = to_device(q, device, dtype=ttnn.bfloat16)
+    k_dev = to_device(k, device, dtype=ttnn.bfloat8_b)
+    w_dev = to_device(w, device)
+    cfg = _sweep_cfg(qc, kc, hb)
+    for _ in range(5):
+        ttnn.experimental.indexer_score(
+            q_dev, k_dev, w_dev, chunk_start_idx=SP7_CHUNK_START, program_config=cfg
+        ).deallocate()
+    ttnn.synchronize_device(device)
+
+
+@pytest.mark.skipif(os.environ.get("CI") == "true", reason="perf test - run locally with tracy")
+@pytest.mark.parametrize("label, heads, qc, kc, hb", _SWEEP_CONFIGS, ids=_SWEEP_IDS)
+def test_indexer_score_sweep_math_util(label, heads, qc, kc, hb):
+    """Spawn the inner sweep test under tracy, report (device_ns, cores, math_util) for the config."""
+    from tracy.process_model_log import run_device_profiler
+    from tests.nightly.sdpa_perf_utils import post_process_ops_log
+
+    subdir = f"ttnn_indexer_score_sweep_{label}"
+    command = (
+        "pytest tests/ttnn/nightly/unit_tests/operations/experimental/test_indexer_score.py::"
+        f"test_indexer_score_sweep_perf_impl[{label}]"
+    )
+    with mock.patch.dict(os.environ, {"CI": "false"}):
+        run_device_profiler(command, subdir, device_analysis_types=["device_kernel_duration"])
+    r = post_process_ops_log(
+        subdir,
+        float_columns=["CORE COUNT", "DEVICE KERNEL DURATION [ns]"],
+        columns=["ATTRIBUTES"],
+        sum_vals=False,
+        has_signposts=False,
+    )
+    assert len(r["DEVICE KERNEL DURATION [ns]"]) > 0, "profiler returned no indexer_score ops"
+
+    core_count = int(r["CORE COUNT"][0])
+    duration_ns = float(r["DEVICE KERNEL DURATION [ns]"].min())
+    mm_flops = indexer_mm_flops(sp7_valid_tiles(), heads)  # shape-only; same across QC/KC/HB at fixed heads
+    peak = _MM_FLOPS_PER_CYCLE_PER_CORE["HiFi2"]  # bf16 q + bfp8 k
+    cycles = duration_ns * _BH_CLOCK_GHZ
+    math_util = (mm_flops / (core_count * cycles * peak)) * 100 if core_count > 0 else 0.0
+    core_ns = core_count * duration_ns  # FLOP-normalized cost (compare this when cores differ)
+    logger.info(
+        f"SWEEP {label}: heads={heads} QC={qc} KC={kc} HB={hb} -> device={duration_ns / 1e6:.4f} ms, "
+        f"cores={core_count}, core*ns={core_ns / 1e6:.2f}, math_util={math_util:.2f}%"
+    )
