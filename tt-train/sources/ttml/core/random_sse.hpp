@@ -27,7 +27,6 @@
 #include <vector>
 
 #include "tt-metalium/bfloat16.hpp"
-#include "tt_stl/assert.hpp"
 
 namespace ttml::core::sse {
 
