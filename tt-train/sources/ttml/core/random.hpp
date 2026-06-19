@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "random_parallel.hpp"
 #include "random_sse.hpp"
 
 namespace ttml::core {
@@ -28,38 +29,13 @@ void parallel_generate(
     DistGenFunc dist_factory,
     uint32_t seed,
     uint32_t max_threads = std::thread::hardware_concurrency()) {
-    constexpr size_t min_size = 1 << 12;  // determined empirically that this is where we see an advantage over
-                                          // sequential generation even with 2 threads.
-    if (seq.size() < min_size) {
-        sequential_generate(seq, dist_factory, seed);
-        return;
-    }
-
-    // Fixed chunk size independent of thread count: seed is per-chunk so output
-    // is identical regardless of how many threads process those chunks.
-    static constexpr size_t CHUNK_SIZE = 512 * 512;
-    const size_t num_threads =
-        std::min(static_cast<size_t>(max_threads), static_cast<size_t>(std::thread::hardware_concurrency()));
-    const size_t num_chunks = (seq.size() + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    const size_t actual_threads = std::min(num_threads, num_chunks);
-    const size_t chunks_per_thread = num_chunks / actual_threads;
-    const size_t leftover = num_chunks % actual_threads;
-
-    std::vector<std::jthread> threads;
-    threads.reserve(actual_threads);
-
-    size_t start_chunk = 0;
-    for (size_t t = 0; t < actual_threads; ++t) {
-        const size_t end_chunk = start_chunk + chunks_per_thread + (t < leftover ? 1 : 0);
-        threads.emplace_back([seq, start_chunk, end_chunk, seed, dist_factory]() {
-            for (size_t chunk = start_chunk; chunk < end_chunk; ++chunk) {
-                const size_t offset = chunk * CHUNK_SIZE;
-                const size_t size = std::min(CHUNK_SIZE, seq.size() - offset);
-                sequential_generate(seq.subspan(offset, size), dist_factory, seed + static_cast<uint32_t>(chunk));
-            }
-        });
-        start_chunk = end_chunk;
-    }
+    ttml::core::generate_parallel_chunks(
+        seq,
+        [dist_factory](std::span<T> s, uint32_t s_seed) {
+            sequential_generate<T, DistGenFunc>(s, dist_factory, s_seed);
+        },
+        seed,
+        max_threads);
 }
 
 }  // namespace legacy
