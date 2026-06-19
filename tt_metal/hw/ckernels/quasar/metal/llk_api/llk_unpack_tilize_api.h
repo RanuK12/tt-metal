@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
+#include <cstdint>
 #include "llk_unpack_common_api.h"
 #include "llk_unpack_tilize.h"
-#include "llk_unpack_tilize_operands_reduce.h"
+#include "llk_unpack_reduce_tilizeA_strided.h"
 #include "api/dataflow/dataflow_buffer.h"
 
 /*************************************************************************
@@ -60,6 +61,11 @@ inline void llk_unpack_tilize_block(
     }
 }
 
+/**
+ * @brief No-op on Quasar — tilize teardown is not required.
+ */
+inline void llk_unpack_tilize_uninit([[maybe_unused]] const std::uint32_t operand) {}
+
 /*************************************************************************
  * LLK UNPACK TILIZE SRC A, UNPACK SRC B
  *************************************************************************/
@@ -90,7 +96,7 @@ template <
     [[maybe_unused]] bool zero_srcA = false,
     [[maybe_unused]] bool zero_srcA_reduce = false>
 inline void llk_unpack_tilizeA_B_init(
-    const std::uint32_t operandA, [[maybe_unused]] const std::uint32_t operandB, const std::uint32_t ct_dim) {
+    const std::uint32_t operandA, const std::uint32_t operandB, const std::uint32_t ct_dim) {
     static_assert(!zero_srcA, "zero_srcA = true does not trigger any functionality on Quasar.");
     static_assert(
         reload_srcB,
@@ -98,6 +104,7 @@ inline void llk_unpack_tilizeA_B_init(
         "kernel.");
 
     const std::uint32_t operandA_id = get_operand_id(operandA);
+    const std::uint32_t operandB_id = get_operand_id(operandB);
 
     const ckernel::TensorShape tensor_shape_A = get_operand_tensor_shape(operandA_id);
 
@@ -111,7 +118,7 @@ inline void llk_unpack_tilizeA_B_init(
     bd_val.f.z_dim = 1;
     ckernel::trisc::_configure_buf_desc_table_(operandA_id, bd_val);
 
-    _llk_unpack_tilize_operands_reduce_init_(operandA_id, ct_dim, tensor_shape_A);
+    _llk_unpack_reduce_tilizeA_strided_init_(operandA_id, operandB_id, ct_dim, tensor_shape_A);
 }
 
 /**
@@ -143,7 +150,7 @@ inline void llk_unpack_tilizeA_B(
     const std::uint32_t operandB,
     const std::uint32_t tile_index_a,
     const std::uint32_t tile_index_b,
-    const std::uint32_t block_ct_dim) {
+    [[maybe_unused]] const std::uint32_t block_ct_dim) {
     static_assert(!zero_srcA, "zero_srcA = true does not trigger any functionality on Quasar.");
     static_assert(
         reload_srcB,
@@ -168,7 +175,7 @@ inline void llk_unpack_tilizeA_B(
 
     WAYPOINT("UPTW");
 
-    _llk_unpack_tilize_operands_reduce_(operandB_id, block_ct_dim, tensor_shape_A, l1_index_a, l1_index_b);
+    _llk_unpack_reduce_tilizeA_strided_(tensor_shape_A, l1_index_a, l1_index_b);
 
     WAYPOINT("UPTD");
 }
