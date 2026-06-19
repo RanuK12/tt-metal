@@ -29,7 +29,7 @@ void parallel_generate(
     DistGenFunc dist_factory,
     uint32_t seed,
     uint32_t max_threads = std::thread::hardware_concurrency()) {
-    ttml::core::generate_parallel_chunks(
+    ttml::core::rng::generate_parallel_chunks(
         seq,
         [dist_factory](std::span<T> s, uint32_t s_seed) {
             sequential_generate<T, DistGenFunc>(s, dist_factory, s_seed);

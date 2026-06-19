@@ -50,13 +50,6 @@ inline constexpr uint32_t float_exponent_bias = 0x3f800000;
 // Helper Functions
 // ============================================================================
 
-// Convert float to bfloat16 by truncating to upper 16 bits
-inline bfloat16 float_to_bfloat16(float value) noexcept {
-    uint32_t float_bits = std::bit_cast<uint32_t>(value);
-    uint16_t bf16_bits = static_cast<uint16_t>(float_bits >> 16);
-    return std::bit_cast<bfloat16>(bf16_bits);
-}
-
 // Calculate cache-aligned chunk size for parallel processing
 template <typename T>
 inline size_t calculate_aligned_chunk_size(size_t total_size, size_t num_threads, size_t simd_batch_size) noexcept {
@@ -71,10 +64,6 @@ inline size_t calculate_aligned_chunk_size(size_t total_size, size_t num_threads
     return ((chunk_size + elems_per_line - 1) / elems_per_line) * elems_per_line;
 }
 
-inline size_t calculate_num_chunks(size_t total_size, size_t chunk_size) noexcept {
-    return (total_size + chunk_size - 1) / chunk_size;
-}
-
 // Create chunks for parallel processing
 template <typename T>
 inline auto create_chunks(std::span<T> output, size_t num_threads, size_t chunk_size) noexcept {
@@ -84,15 +73,6 @@ inline auto create_chunks(std::span<T> output, size_t num_threads, size_t chunk_
                return output.subspan(offset, size);
            }) |
            std::views::take_while([](auto chunk) { return !chunk.empty(); });
-}
-
-// Calculate thread-specific seed
-inline uint64_t calculate_thread_seed(uint32_t base_seed, size_t thread_id) noexcept {
-    return static_cast<uint64_t>(base_seed) + (static_cast<uint64_t>(thread_id) << thread_seed_shift_bits);
-}
-
-inline uint64_t calculate_chunk_seed(uint32_t base_seed, size_t chunk_id, size_t chunk_size) noexcept {
-    return static_cast<uint64_t>(base_seed) + (static_cast<uint64_t>(chunk_id * chunk_size) << thread_seed_shift_bits);
 }
 
 // ============================================================================
@@ -289,7 +269,7 @@ inline void fill_remainder_simd(
                 __m128 rand = rng.generate_float_x4();
                 float val = _mm_cvtss_f32(rand);
                 float scaled = min + val * range;
-                output[i] = float_to_bfloat16(scaled);
+                output[i] = bfloat16(scaled);
             }
         } else if constexpr (std::same_as<Dist, std::normal_distribution<float>>) {
             const float mean = params.mean();
@@ -308,7 +288,7 @@ inline void fill_remainder_simd(
                 float theta = two_pi * u2_val;
                 float z = r * std::cos(theta);
                 float result = z * stddev + mean;
-                output[i] = float_to_bfloat16(result);
+                output[i] = bfloat16(result);
             }
         }
     }
@@ -482,7 +462,7 @@ inline void sequential_generate(std::span<T> seq, DistGenFunc dist_factory, uint
             std::vector<float> temp(seq.size());
             generate_normal_simd(std::span<float>{temp}, seed, dist_factory);
             for (size_t i = 0; i < seq.size(); ++i) {
-                seq[i] = float_to_bfloat16(temp[i]);
+                seq[i] = bfloat16(temp[i]);
             }
         }
     }
@@ -497,13 +477,13 @@ inline void parallel_generate(
     if constexpr (std::same_as<T, float>) {
         using Dist = decltype(dist_factory());
         if constexpr (std::same_as<Dist, std::uniform_real_distribution<float>>) {
-            ttml::core::generate_parallel_chunks(
+            ttml::core::rng::generate_parallel_chunks(
                 seq,
                 [dist_factory](std::span<float> s, uint32_t s_seed) { generate_uniform_simd(s, s_seed, dist_factory); },
                 seed,
                 max_threads);
         } else if constexpr (std::same_as<Dist, std::normal_distribution<float>>) {
-            ttml::core::generate_parallel_chunks(
+            ttml::core::rng::generate_parallel_chunks(
                 seq,
                 [dist_factory](std::span<float> s, uint32_t s_seed) { generate_normal_simd(s, s_seed, dist_factory); },
                 seed,
@@ -512,7 +492,7 @@ inline void parallel_generate(
     } else if constexpr (std::same_as<T, bfloat16>) {
         using Dist = decltype(dist_factory());
         if constexpr (std::same_as<Dist, std::uniform_real_distribution<float>>) {
-            ttml::core::generate_parallel_chunks(
+            ttml::core::rng::generate_parallel_chunks(
                 seq,
                 [dist_factory](std::span<bfloat16> s, uint32_t s_seed) {
                     generate_uniform_simd_bfloat16(s, s_seed, dist_factory);
@@ -521,13 +501,13 @@ inline void parallel_generate(
                 max_threads);
         } else if constexpr (std::same_as<Dist, std::normal_distribution<float>>) {
             std::vector<float> temp(seq.size());
-            ttml::core::generate_parallel_chunks(
+            ttml::core::rng::generate_parallel_chunks(
                 std::span<float>{temp},
                 [dist_factory](std::span<float> s, uint32_t s_seed) { generate_normal_simd(s, s_seed, dist_factory); },
                 seed,
                 max_threads);
             for (size_t i = 0; i < seq.size(); ++i) {
-                seq[i] = float_to_bfloat16(temp[i]);
+                seq[i] = bfloat16(temp[i]);
             }
         }
     }
