@@ -350,7 +350,8 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
 // One call processes one 2/3/4-tile chunk inside a wider row.
 // Output address points at this chunk's row-0 column in the row-major tensor.
 template <std::uint32_t block_ct_dim, std::uint32_t full_ct_dim>
-inline void _llk_pack_fast_untilize_block_strided_(const std::uint32_t address, const std::uint32_t unit_dim, std::uint32_t& prev_unit_dim)
+inline void _llk_pack_fast_untilize_block_strided_(
+    const std::uint32_t address, const std::uint32_t unit_dim, std::uint32_t& prev_unit_dim, const std::uint32_t output_row_stride_16B = 0)
 {
     static_assert(block_ct_dim >= 2 && block_ct_dim <= FAST_UNTILIZE_MAX_UNIT_DIM, "BH fast untilize strided path supports block_ct_dim 2, 3, or 4");
     static_assert(full_ct_dim > block_ct_dim, "Use the contiguous fast_untilize block when the chunk is the full row");
@@ -367,7 +368,14 @@ inline void _llk_pack_fast_untilize_block_strided_(const std::uint32_t address, 
     _llk_pack_fast_untilize_select_phase_<FAST_UNTILIZE_PACK_TOP_STRIP_DEST_TARGET_OFFSET>();
     ckernel_template::run();
 
-    // The row-close MOP has already advanced L1_Dest_addr to output row 16.
+    if (output_row_stride_16B != 0)
+    {
+        // On large row strides, BH silicon does not reliably carry the row-close
+        // output address from the top phase into the bottom phase. Rebase phase 2
+        // explicitly at row 16 and restart the output Y counter from zero.
+        _llk_pack_fast_untilize_reset_output_row_counter_();
+        program_packer_destination(address + FAST_UNTILIZE_PHASE_ROWS * output_row_stride_16B);
+    }
     // Phase selection and counter restore are consumed by later PACRs, matching
     // the contiguous path's no-wait sequence.
     _llk_pack_fast_untilize_select_phase_<FAST_UNTILIZE_PACK_BOTTOM_STRIP_DEST_TARGET_OFFSET>();
