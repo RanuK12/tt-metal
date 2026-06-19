@@ -441,6 +441,7 @@ void generate_uniform_simd_bfloat16(std::span<bfloat16> output, uint32_t seed, a
 // Drop-in Replacement API
 // ============================================================================
 
+// Sequential generate - matches original random.hpp API
 template <typename T, typename DistGenFunc>
 inline void sequential_generate(std::span<T> seq, DistGenFunc dist_factory, uint32_t seed) noexcept {
     // SIMD fast path for float distributions
@@ -468,12 +469,14 @@ inline void sequential_generate(std::span<T> seq, DistGenFunc dist_factory, uint
     }
 }
 
+// Parallel generate - matches original random.hpp API
 template <typename T, typename DistGenFunc>
 inline void parallel_generate(
     std::span<T> seq,
     DistGenFunc dist_factory,
     uint32_t seed,
     uint32_t max_threads = std::thread::hardware_concurrency()) noexcept {
+    // SIMD fast path for float distributions
     if constexpr (std::same_as<T, float>) {
         using Dist = decltype(dist_factory());
         if constexpr (std::same_as<Dist, std::uniform_real_distribution<float>>) {
@@ -489,6 +492,7 @@ inline void parallel_generate(
                 seed,
                 max_threads);
         }
+        // SIMD fast path for bfloat16 distributions
     } else if constexpr (std::same_as<T, bfloat16>) {
         using Dist = decltype(dist_factory());
         if constexpr (std::same_as<Dist, std::uniform_real_distribution<float>>) {
@@ -500,6 +504,7 @@ inline void parallel_generate(
                 seed,
                 max_threads);
         } else if constexpr (std::same_as<Dist, std::normal_distribution<float>>) {
+            // For normal distribution with bfloat16, generate as float then convert
             std::vector<float> temp(seq.size());
             ttml::core::rng::generate_parallel_chunks(
                 std::span<float>{temp},
